@@ -19,6 +19,9 @@ import Redis from 'redis'
 export default (robot, redis = Redis) => {
   const redisUrlEnv = getRedisEnv()
   const redisUrl = process.env[redisUrlEnv] || 'redis://localhost:6379'
+  const redisDataFormat = process.env['REDIS_DATA_FORMAT'] || 'text'
+  const redisDataMigrate = process.env['REDIS_DATA_MIGRATE'] || false
+
   robot.config = Object.assign(robot.config || {}, { redisUrl })
   if (redisUrlEnv) {
     // Sanitize password in URL for logging
@@ -86,22 +89,53 @@ export default (robot, redis = Redis) => {
 
   robot.brain.setAutoSave(false)
 
-  const getData = () => {
+  const getTextData = () => {
     client.get(`${prefix}:storage`).then((reply) => {
       if (reply) {
-        robot.logger.info(`hubot-redis-brain: Data for ${prefix} brain retrieved from Redis`)
+        robot.logger.info(`hubot-redis-brain: Text Data for ${prefix} brain retrieved from Redis`)
         robot.brain.mergeData(JSON.parse(reply.toString()))
         robot.brain.emit('connected')
       } else {
-        robot.logger.info(`hubot-redis-brain: Initializing new data for ${prefix} brain`)
+        robot.logger.info(`hubot-redis-brain: Initializing new Text data for ${prefix} brain`)
         robot.brain.mergeData({})
         robot.brain.emit('connected')
       }
-
       robot.brain.setAutoSave(true)
     }).catch(err => {
       robot.logger.error(`hubot-redis-brain: Unable to get data from Redis: ${err}`)
     })
+  }
+
+  const getJSONData = () => {
+    client.json.get(`${prefix}:JSONstorage`).then((reply) => {
+      if (reply) {
+        robot.logger.info(`hubot-redis-brain: JSON Data for ${prefix} brain retrieved from Redis`)
+        robot.brain.mergeData(JSON.parse(reply.toString()))
+        robot.brain.emit('connected')
+      } else {
+
+        if ( robot.brain.data.length === 0 && redisDataMigrate === 'true' ) {
+          // first instantiation, pull data from the text storage
+          robot.logger.info(`hubot-redis-brain: Attempting to migrate data from ${prefix}:storage into ${prefix}:JSONstorage`)
+          getTextData();
+          client.json.set(`${prefix}:JSONstorage`, robot.brain.data)
+          robot.brain.emit('connected')
+        } else {
+          robot.logger.info(`hubot-redis-brain: Initializing new JSON data for ${prefix}:JSONstorage brain`)
+          robot.brain.mergeData({})
+          robot.brain.emit('connected')
+        }
+      }
+    })
+
+  }
+
+  const getData = () => {
+    if (redisDataFormat === 'json') {
+      getJSONData()
+    } else {
+      getTextData()
+    }
   }
 
   if (info.auth) {
@@ -130,7 +164,20 @@ export default (robot, redis = Redis) => {
     if (!data) {
       data = {}
     }
-    client.set(`${prefix}:storage`, JSON.stringify(data))
+
+    if (redisDataFormat === 'json') {
+      if (!data.storageKey) {
+        robot.logger.error('hubot-redis-brain: storageKey is required for saving JSON data. No data was saved.')
+        return
+      }
+
+      const key = data.storageKey;
+      data = data[key];
+
+      client.json.set(`${prefix}:JSONstorage`, key, data)
+    } else {
+      client.set(`${prefix}:storage`, JSON.stringify(data))
+    }
   })
 
   robot.brain.on('close', () => client.quit())
